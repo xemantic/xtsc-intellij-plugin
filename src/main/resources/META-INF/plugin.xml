@@ -1,11 +1,31 @@
 <!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
 <idea-plugin>
-    <id>com.github.morisil.xtscintellijplugin</id>
-    <name>xtsc-intellij-plugin</name>
-    <vendor>morisil</vendor>
+    <!-- The id must not contain a JetBrains product name as a dot-separated component
+         ("intellij" among them), so it cannot mirror the group and package. -->
+    <id>com.xemantic.xtsc</id>
+    <name>xtsc</name>
+    <vendor url="https://xemantic.com" email="morisil@xemantic.com">Xemantic</vendor>
     <description><![CDATA[
-        <p><b>xtsc-intellij-plugin</b> is a repository that provides a pure template to make it easier to create a new plugin project.</p>
-        <p>The main goal of this template is to speed up the setup phase of plugin development for both new and experienced developers by preconfiguring the project scaffold and CI, linking to the proper documentation pages, and keeping everything organized.</p>
+        <p>TypeScript code insight backed by <b>xtsc</b> &mdash; the TypeScript scanner, parser, binder,
+        type checker, transformer and emitter rewritten from scratch in Kotlin.</p>
+
+        <p>The compiler runs inside the IDE process. There is no Node.js runtime, no
+        <code>tsserver</code> child process, and no language server protocol between the editor and the
+        type checker &mdash; the IDE asks the compiler for hover, completion, navigation and diagnostics
+        through a direct function call, against unsaved editor buffers.</p>
+
+        <p>Planned capabilities:</p>
+        <ul>
+            <li>Whole-program type checking driven by <code>tsconfig.json</code></li>
+            <li>Hover, go to definition, find usages, completion and signature help</li>
+            <li>Rename that is re-checked before it is applied</li>
+            <li>Diagnostics matching those reported by <code>tsc</code></li>
+        </ul>
+
+        <p>This plugin is in early development and does not implement the above yet. Follow its progress
+        in the <a href="https://github.com/xemantic/xtsc-intellij-plugin">plugin repository</a>, and read
+        about the compiler behind it in the
+        <a href="https://github.com/xemantic/xemantic-typescript-compiler">xtsc repository</a>.</p>
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
@@ -13,7 +33,7 @@
     <resource-bundle>messages.MyBundle</resource-bundle>
 
     <extensions defaultExtensionNs="com.intellij">
-        <toolWindow factoryClass="com.github.morisil.xtscintellijplugin.toolWindow.MyToolWindowFactory" id="MyToolWindow"/>
-        <postStartupActivity implementation="com.github.morisil.xtscintellijplugin.startup.MyProjectActivity" />
+        <toolWindow factoryClass="com.xemantic.xtsc.intellij.toolWindow.MyToolWindowFactory" id="MyToolWindow"/>
+        <postStartupActivity implementation="com.xemantic.xtsc.intellij.startup.MyProjectActivity" />
     </extensions>
 </idea-plugin>
