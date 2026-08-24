@@ -4,7 +4,7 @@
          ("intellij" among them), so it cannot mirror the group and package. -->
     <id>com.xemantic.xtsc</id>
     <name>xtsc</name>
-    <vendor url="https://xemantic.com" email="morisil@xemantic.com">Xemantic</vendor>
+    <vendor url="https://xemantic.com" email="office@xemantic.com">Xemantic</vendor>
     <description><![CDATA[
         <p>TypeScript code insight backed by <b>xtsc</b> &mdash; the TypeScript scanner, parser, binder,
         type checker, transformer and emitter rewritten from scratch in Kotlin.</p>
@@ -30,10 +30,12 @@
 
     <depends>com.intellij.modules.platform</depends>
 
-    <resource-bundle>messages.MyBundle</resource-bundle>
-
     <extensions defaultExtensionNs="com.intellij">
-        <toolWindow factoryClass="com.xemantic.xtsc.intellij.toolWindow.MyToolWindowFactory" id="MyToolWindow"/>
-        <postStartupActivity implementation="com.xemantic.xtsc.intellij.startup.MyProjectActivity" />
+        <!-- Registered for `Language.ANY`: a `.ts` file is recognised by its extension,
+             so the compiler is asked about it whether or not the IDE has a TypeScript
+             language of its own. -->
+        <externalAnnotator
+            language=""
+            implementationClass="com.xemantic.xtsc.intellij.annotator.TypeScriptAnnotator"/>
     </extensions>
 </idea-plugin>

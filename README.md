@@ -15,9 +15,22 @@ the TypeScript compiler rewritten from scratch in Kotlin.
 
 > [!WARNING]
 > Early development.
-> The repository currently holds the project scaffold and the sample code generated from the
-> [IntelliJ Platform Plugin Template][template] — none of the capabilities described below are
-> implemented yet, and the plugin has not been published to JetBrains Marketplace.
+> Error highlighting works;
+> everything else below is still the scaffold generated from the [IntelliJ Platform Plugin Template][template],
+> and the plugin has not been published to JetBrains Marketplace.
+
+## What works
+
+Errors reported by `xtsc` are highlighted in `.ts`, `.tsx`, `.mts` and `.cts` files
+that sit under a `tsconfig.json`,
+against the editor's buffer rather than what is on disk —
+so an error appears as you type it, without saving.
+
+The compiler runs in the IDE process.
+Because it is built against Kotlin 2.4 metadata and kotlinx-coroutines 1.11,
+the plugin requires **IntelliJ IDEA 2026.2 or newer**
+and relocates the compiler's `kotlinx` packages away from the ones the IDE bundles;
+see [CLAUDE.md](CLAUDE.md) for why each of those is load-bearing.
 
 ## Why?
 
