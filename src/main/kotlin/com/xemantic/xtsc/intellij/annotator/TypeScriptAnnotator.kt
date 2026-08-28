@@ -168,7 +168,9 @@ internal class TypeScriptAnnotator : ExternalAnnotator<TypeScriptAnnotator.Reque
      */
     private fun bundledEngineActive(): Boolean {
         val javascriptPluginId = PluginId.getId("JavaScript")
-        if (PluginManagerCore.getPlugin(javascriptPluginId) == null) return false
+        // `isPluginInstalled` answers "present, enabled or not" and, unlike
+        // `getPlugin`, is not `@ApiStatus.Internal` — which `verifyPlugin` fails on.
+        if (!PluginManagerCore.isPluginInstalled(javascriptPluginId)) return false
         if (PluginManagerCore.isDisabled(javascriptPluginId)) return false
         if (bundledEngineReported.compareAndSet(false, true)) {
             LOG.info(
