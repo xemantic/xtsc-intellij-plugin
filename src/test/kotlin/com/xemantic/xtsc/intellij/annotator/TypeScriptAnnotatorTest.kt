@@ -18,15 +18,19 @@ package com.xemantic.xtsc.intellij.annotator
 
 import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.openapi.actionSystem.IdeActions
+import com.intellij.openapi.application.runWriteAction
+import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.platform.testFramework.junit5.codeInsight.fixture.codeInsightFixture
 import com.intellij.testFramework.junit5.TestApplication
 import com.intellij.testFramework.junit5.fixture.moduleFixture
 import com.intellij.testFramework.junit5.fixture.projectFixture
 import com.intellij.testFramework.junit5.fixture.tempPathFixture
+import com.intellij.testFramework.runInEdtAndWait
 import com.xemantic.kotlin.test.assert
 import com.xemantic.kotlin.test.have
 import com.xemantic.kotlin.test.should
 import com.xemantic.xtsc.intellij.ShadedDispatcherThreads
+import com.xemantic.xtsc.intellij.compiler.TSCONFIG_FILE_NAME
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.ExtendWith
@@ -94,6 +98,53 @@ class TypeScriptAnnotatorTest {
 
         // then
         assert(errors.isEmpty())
+    }
+
+    @Test
+    fun `Should place the error span correctly after a non-ASCII character`() {
+        // given
+        // an emoji is 1 code point, 2 UTF-16 units and 4 UTF-8 bytes, so only offsets in
+        // UTF-16 units — what the editor expects — put the span on `x`; the compiler's
+        // KDoc promises byte offsets but emits Kotlin string indices, and this is the
+        // test that fails the moment either side changes its unit
+        val source = "const emoji = \"😀\";\nconst x: number = \"bad\";\n"
+        val file = fixture.tempDirFixture.createFile("src/emoji.ts", source)
+        fixture.configureFromExistingVirtualFile(file)
+
+        // when
+        val errors = fixture.doHighlighting(HighlightSeverity.ERROR)
+
+        // then
+        assert(errors.size == 1)
+        errors[0] should {
+            have(description.startsWith("TS2322:"))
+            have(source.substring(startOffset, endOffset) == "x")
+        }
+    }
+
+    @Test
+    fun `Should report a tsconfig error against the file as a whole`() {
+        // given
+        // the tsconfig written by `writeTsconfig` is spoiled after the fact
+        val tsconfig = fixture.tempDirFixture.getFile("tsconfig.json")!!
+        runInEdtAndWait {
+            runWriteAction { VfsUtil.saveText(tsconfig, "{ this is not JSON") }
+        }
+        val source = "export const ok: number = 1;\n"
+        val file = fixture.tempDirFixture.createFile("src/governed.ts", source)
+        fixture.configureFromExistingVirtualFile(file)
+
+        // when
+        val errors = fixture.doHighlighting(HighlightSeverity.ERROR)
+
+        // then
+        // the diagnostic belongs to `tsconfig.json`, so nothing may be underlined at its
+        // offsets inside this file — it is reported file-level, named after its true home
+        assert(errors.isNotEmpty())
+        errors should {
+            have(all { it.description.startsWith("$TSCONFIG_FILE_NAME: TS") })
+            have(all { it.startOffset == 0 && it.endOffset == source.length })
+        }
     }
 
     @Test

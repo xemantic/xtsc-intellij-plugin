@@ -59,6 +59,17 @@ see the [README](README.md#markdown-soft-wrapping-in-the-ide) for how to enable 
   and the failure moves between runs without looking like a shading problem.
   `ShadedDispatcherThreads` excuses them by thread name instead.
 
+- `XtscService.irrelevant()` needs read access and gets it from `BulkFileListener` running inside the VFS change's write action (`@RequiresWriteLock`) —
+  but the platform javadoc reserves the right to move VFS events off the write action in a future version,
+  which would make that read access something to acquire explicitly.
+- The compiler's KDoc documents `Diagnostic.start` as a byte offset,
+  but the implementation emits Kotlin string indices — UTF-16 code units, exactly what `TextRange` expects —
+  so the annotator passes them through untranslated;
+  the annotator test with an emoji before the error pins that and fails the moment either side changes its unit.
+- The compiler has no way to revert an overlay back to disk,
+  so a session cannot evict a single stale buffer — invalidation always drops the whole session,
+  and the service's idle eviction is what bounds overlay growth.
+
 ## Why the plugin targets IntelliJ 2026.2 and nothing older
 
 The compiler publishes **Kotlin 2.4 metadata**,

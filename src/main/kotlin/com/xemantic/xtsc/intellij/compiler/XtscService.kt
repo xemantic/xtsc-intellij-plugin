@@ -25,11 +25,15 @@ import com.intellij.openapi.roots.ProjectFileIndex
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.openapi.vfs.newvfs.BulkFileListener
+import com.intellij.openapi.vfs.newvfs.events.VFileCreateEvent
 import com.intellij.openapi.vfs.newvfs.events.VFileEvent
 import com.intellij.openapi.vfs.newvfs.events.VFileMoveEvent
 import com.intellij.openapi.vfs.newvfs.events.VFilePropertyChangeEvent
+import com.intellij.util.concurrency.AppExecutorUtil
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.time.Duration.Companion.minutes
 
 /** The name of the file that defines a TypeScript program. */
 internal const val TSCONFIG_FILE_NAME = "tsconfig.json"
@@ -47,6 +51,18 @@ internal fun VirtualFile.isTypeScript(): Boolean =
     !isDirectory && extension?.lowercase() in TYPESCRIPT_EXTENSIONS
 
 /**
+ * How long a session may sit unqueried before it is closed. Each session owns a thread
+ * and a fully built in-memory program, so merely browsing across a monorepo would
+ * otherwise accumulate one of each per `tsconfig.json` visited, for the life of the
+ * project — nothing but a change on disk would ever let go of them. An evicted session
+ * costs its next pass one rebuild, which ten minutes of not looking at it has earned.
+ */
+private val SESSION_IDLE_TIMEOUT = 10.minutes
+
+/** How often the sessions are swept for ones idle past [SESSION_IDLE_TIMEOUT]. */
+private val IDLE_SWEEP_PERIOD = 1.minutes
+
+/**
  * The compiler sessions of one IDE project, one per `tsconfig.json` in play.
  */
 @Service(Service.Level.PROJECT)
@@ -59,6 +75,13 @@ internal class XtscService(private val project: Project) : Disposable {
 
     /** Whether the unsupported-path refusal has been logged, so that it is logged once. */
     private val unsupportedPathReported = AtomicBoolean()
+
+    private val idleSweep = AppExecutorUtil.getAppScheduledExecutorService().scheduleWithFixedDelay(
+        ::evictIdleSessions,
+        IDLE_SWEEP_PERIOD.inWholeMilliseconds,
+        IDLE_SWEEP_PERIOD.inWholeMilliseconds,
+        TimeUnit.MILLISECONDS,
+    )
 
     init {
         project.messageBus.connect(this).subscribe(
@@ -96,7 +119,17 @@ internal class XtscService(private val project: Project) : Disposable {
             session.close()
             return null
         }
+        // Being asked for is being used; without this, a session mid-pass could look
+        // idle to the sweep racing it.
+        session.lastUsedNanos = System.nanoTime()
         return session
+    }
+
+    /** Closes every session that [SESSION_IDLE_TIMEOUT] has passed by; the sweep's tick. */
+    internal fun evictIdleSessions() {
+        closeSessions { session ->
+            System.nanoTime() - session.lastUsedNanos > SESSION_IDLE_TIMEOUT.inWholeNanoseconds
+        }
     }
 
     /**
@@ -122,6 +155,7 @@ internal class XtscService(private val project: Project) : Disposable {
 
     override fun dispose() {
         disposed = true
+        idleSweep.cancel(false)
         sessions.values.forEach(XtscSession::close)
         sessions.clear()
     }
@@ -147,6 +181,10 @@ internal class XtscService(private val project: Project) : Disposable {
         for (event in events) {
             if (sessions.isEmpty()) return
             if (irrelevant(event)) continue
+            // A directory born empty holds nothing any program reads; sparing it keeps
+            // "new folder" in the Project view, or a tool scaffolding an output
+            // directory, from evicting every warm build in the project.
+            if (event is VFileCreateEvent && event.isEmptyDirectory) continue
             // A directory event arrives alone — the files inside get no events of their
             // own — so a created, deleted or moved directory may have held anything.
             if (event.isDirectoryEvent) {

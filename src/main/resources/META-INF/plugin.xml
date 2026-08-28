@@ -33,7 +33,10 @@
     <extensions defaultExtensionNs="com.intellij">
         <!-- Registered for `Language.ANY`: a `.ts` file is recognised by its extension,
              so the compiler is asked about it whether or not the IDE has a TypeScript
-             language of its own. -->
+             language of its own. In an IDE whose bundled "JavaScript and TypeScript"
+             plugin is enabled, the annotator stands down at runtime — both engines
+             report in the same `TS<code>: <message>` shape, and running both would
+             underline every error twice. -->
         <externalAnnotator
             language=""
             implementationClass="com.xemantic.xtsc.intellij.annotator.TypeScriptAnnotator"/>

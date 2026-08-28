@@ -70,6 +70,12 @@ class XtscSessionTest {
 
     private fun sourcePath(name: String) = root.resolve("src").resolve(name).toString()
 
+    private var nextVersion = 0L
+
+    /** Each buffer under the next version, the way successive editor snapshots arrive. */
+    private fun buffers(vararg entries: Pair<String, String>): Map<String, BufferContent> =
+        entries.associate { (path, text) -> path to BufferContent(text, ++nextVersion) }
+
     @Test
     fun `Should report a type error read from disk`() {
         // given
@@ -103,7 +109,7 @@ class XtscSessionTest {
 
         // when
         // nothing is written to disk; the compiler sees only the overlay
-        val diagnostics = session.diagnostics(mapOf(path to "const x: number = true;\n"), path)
+        val diagnostics = session.diagnostics(buffers(path to "const x: number = true;\n"), path)
 
         // then
         diagnostics should {
@@ -153,13 +159,39 @@ class XtscSessionTest {
     }
 
     @Test
+    fun `Should ignore a buffer snapshot older than the one already applied`() {
+        // given
+        val path = sourcePath("raced.ts")
+        Path.of(path).writeText("const x: number = 1;\n")
+        val session = session()
+        val older = BufferContent("const x: number = 1;\n", 1)
+        val newer = BufferContent("const x: number = true;\n", 2)
+        session.diagnostics(mapOf(path to newer), path) should {
+            have(any { it.category == DiagnosticCategory.Error })
+        }
+
+        // when
+        // a concurrent pass snapshotted before the edit and reached the session after it
+        val diagnostics = session.diagnostics(mapOf(path to older), path)
+
+        // then
+        // the compiler still answers from the newer text, not rewound to the older
+        diagnostics should {
+            have(any { it.category == DiagnosticCategory.Error })
+        }
+    }
+
+    @Test
     fun `Should scope diagnostics to the queried file`() {
         // given
         val broken = sourcePath("broken.ts")
         val clean = sourcePath("clean.ts")
         Path.of(broken).writeText("const x: number = \"nope\";\n")
         Path.of(clean).writeText("export const y: number = 1;\n")
-        val buffers = listOf(broken, clean).associateWith { Path.of(it).readText() }
+        val buffers = buffers(
+            broken to Path.of(broken).readText(),
+            clean to Path.of(clean).readText(),
+        )
 
         // when
         val diagnostics = session().diagnostics(buffers, clean)

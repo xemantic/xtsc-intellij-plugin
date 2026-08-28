@@ -42,6 +42,12 @@ import org.junit.jupiter.api.extension.ExtensionContext
  * A worker is spawned when the scheduler decides it needs one, which is to say in whichever
  * test happens to ask the compiler something at the wrong moment — the failure this
  * prevents moves between tests from run to run.
+ *
+ * The sessions' own `xtsc: <tsconfig path>` executor threads are excused alongside them:
+ * `XtscService.dispose` hands each session's close to that session's thread and returns
+ * without waiting — deliberately, since dispose may run on the EDT — so a close still
+ * finishing when the tracker looks (a large built project on a loaded CI machine) would
+ * otherwise fail the run intermittently.
  */
 class ShadedDispatcherThreads : BeforeAllCallback, AfterAllCallback {
 
@@ -50,7 +56,7 @@ class ShadedDispatcherThreads : BeforeAllCallback, AfterAllCallback {
     @Suppress("UnstableApiUsage")
     override fun beforeAll(context: ExtensionContext) {
         disposable = Disposer.newDisposable("shaded coroutine dispatcher threads")
-        ThreadLeakTracker.longRunningThreadCreated(disposable, "DefaultDispatcher-worker")
+        ThreadLeakTracker.longRunningThreadCreated(disposable, "DefaultDispatcher-worker", "xtsc: ")
     }
 
     override fun afterAll(context: ExtensionContext) {

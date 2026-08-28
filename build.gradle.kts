@@ -140,7 +140,9 @@ tasks.withType<RunIdeTask>().configureEach {
 }
 
 // ...and this takes the other engine out of the sandbox altogether, so that whatever is
-// underlined in a `.ts` file there came from xtsc. `JavaScript` is the id of the bundled
+// underlined in a `.ts` file there came from xtsc. It is also what turns xtsc ON there:
+// the annotator stands down whenever the bundled plugin is enabled, so without this the
+// sandbox would exercise nothing. `JavaScript` is the id of the bundled
 // "JavaScript and TypeScript" plugin; everything built on it — Angular, Vue, React,
 // Prettier, ESLint, Next.js, Vite, NodeJS — is dropped with it by the platform's own
 // dependency resolution, and none of it is disabled in the IDE this build runs from.

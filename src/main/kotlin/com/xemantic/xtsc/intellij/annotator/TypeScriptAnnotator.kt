@@ -16,10 +16,12 @@
 
 package com.xemantic.xtsc.intellij.annotator
 
+import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.lang.annotation.AnnotationHolder
 import com.intellij.lang.annotation.ExternalAnnotator
 import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.openapi.components.service
+import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.diagnostic.debug
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.editor.Document
@@ -37,9 +39,12 @@ import com.xemantic.typescript.compiler.DiagnosticCategory
 // ambiguous with the default-imported `kotlin.Error`, and an explicit import is
 // what outranks it.
 import com.xemantic.typescript.compiler.DiagnosticCategory.Error
+import com.xemantic.xtsc.intellij.compiler.BufferContent
 import com.xemantic.xtsc.intellij.compiler.TSCONFIG_FILE_NAME
 import com.xemantic.xtsc.intellij.compiler.XtscService
 import com.xemantic.xtsc.intellij.compiler.isTypeScript
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 private val LOG = logger<TypeScriptAnnotator>()
 
@@ -59,8 +64,11 @@ internal class TypeScriptAnnotator : ExternalAnnotator<TypeScriptAnnotator.Reque
         val tsconfigPath: String,
         val filePath: String,
         /** Path to current text, for every buffer the next build should see. */
-        val buffers: Map<String, String>,
+        val buffers: Map<String, BufferContent>,
     )
+
+    /** Whether the stand-down before the bundled engine has been logged, so it is logged once. */
+    private val bundledEngineReported = AtomicBoolean()
 
     override fun collectInformation(file: PsiFile, editor: Editor, hasErrors: Boolean): Request? =
         collect(file, includeOpenBuffers = true)
@@ -83,13 +91,23 @@ internal class TypeScriptAnnotator : ExternalAnnotator<TypeScriptAnnotator.Reque
     override fun apply(file: PsiFile, diagnostics: List<Diagnostic>?, holder: AnnotationHolder) {
         if (diagnostics.isNullOrEmpty()) return
         val fileLength = file.textLength
+        val filePath = file.virtualFile?.path
         for (diagnostic in diagnostics) {
-            if (diagnostic.start == null) {
-                // A diagnostic without a span — a broken `tsconfig.json`, a bad
-                // compiler option, an empty `include` — concerns the file as a
+            // The query rides the config's path along with the file's, so a diagnostic
+            // may belong to `tsconfig.json` rather than to the file on screen — and its
+            // span then points into THAT file, never into this one.
+            val foreign = diagnostic.fileName != null && diagnostic.fileName != filePath
+            if (foreign || diagnostic.start == null) {
+                // A foreign diagnostic, or one without a span — a broken `tsconfig.json`,
+                // a bad compiler option, an empty `include` — concerns the file as a
                 // whole, not any character in it.
-                holder.newAnnotation(diagnostic.category.severity, diagnostic.codedMessage)
-                    .tooltip(diagnostic.tooltip)
+                val message = if (foreign) {
+                    "${diagnostic.fileName!!.substringAfterLast('/')}: ${diagnostic.codedMessage}"
+                } else {
+                    diagnostic.codedMessage
+                }
+                holder.newAnnotation(diagnostic.category.severity, message)
+                    .tooltip(diagnostic.tooltip(message))
                     .range(TextRange(0, fileLength))
                     .fileLevel()
                     .create()
@@ -101,7 +119,7 @@ internal class TypeScriptAnnotator : ExternalAnnotator<TypeScriptAnnotator.Reque
             // a `PluginException` that aborts the whole highlighting pass.
             val range = diagnostic.rangeIn(fileLength) ?: continue
             holder.newAnnotation(diagnostic.category.severity, diagnostic.codedMessage)
-                .tooltip(diagnostic.tooltip)
+                .tooltip(diagnostic.tooltip(diagnostic.codedMessage))
                 .range(range)
                 .create()
         }
@@ -110,6 +128,7 @@ internal class TypeScriptAnnotator : ExternalAnnotator<TypeScriptAnnotator.Reque
     private fun collect(file: PsiFile, includeOpenBuffers: Boolean): Request? {
         val virtualFile = file.virtualFile ?: return null
         if (!virtualFile.isTypeScript()) return null
+        if (bundledEngineActive()) return null
         val project = file.project
         val service = project.service<XtscService>()
         val tsconfig = service.tsconfigFor(virtualFile) ?: run {
@@ -117,7 +136,7 @@ internal class TypeScriptAnnotator : ExternalAnnotator<TypeScriptAnnotator.Reque
             return null
         }
 
-        val buffers = LinkedHashMap<String, String>()
+        val buffers = LinkedHashMap<String, BufferContent>()
         if (includeOpenBuffers) {
             // Every open TypeScript tab, whichever `tsconfig.json` it sits under: the
             // compiler must see the current text of each of them, or this file would be
@@ -130,19 +149,47 @@ internal class TypeScriptAnnotator : ExternalAnnotator<TypeScriptAnnotator.Reque
             for (openFile in FileEditorManager.getInstance(project).openFiles) {
                 if (!openFile.isTypeScript()) continue
                 val document = documents.getDocument(openFile) ?: continue
-                buffers[openFile.path] = document.cachedText()
+                buffers[openFile.path] = document.cachedContent()
             }
         }
-        // The annotated file need not be open in an editor at all.
-        val text = FileDocumentManager.getInstance().getDocument(virtualFile)?.cachedText() ?: file.text
-        buffers.putIfAbsent(virtualFile.path, text)
+        // The annotated file need not be open in an editor at all; text read off the PSI
+        // rather than a document carries version 0, which never overrides a buffer.
+        val content = FileDocumentManager.getInstance().getDocument(virtualFile)?.cachedContent()
+            ?: BufferContent(file.text, 0)
+        buffers.putIfAbsent(virtualFile.path, content)
         return Request(project, tsconfig.path, virtualFile.path, buffers)
+    }
+
+    /**
+     * Whether the IDE's own "JavaScript and TypeScript" plugin is enabled. It reports
+     * every error this annotator would, in the very same `TS<code>: <message>` shape, so
+     * running both would underline everything twice — xtsc stands down instead, and says
+     * so once in the log. Disabling the bundled plugin is what hands `.ts` files to xtsc.
+     */
+    private fun bundledEngineActive(): Boolean {
+        val javascriptPluginId = PluginId.getId("JavaScript")
+        if (PluginManagerCore.getPlugin(javascriptPluginId) == null) return false
+        if (PluginManagerCore.isDisabled(javascriptPluginId)) return false
+        if (bundledEngineReported.compareAndSet(false, true)) {
+            LOG.info(
+                "the bundled JavaScript and TypeScript plugin is enabled, so xtsc leaves" +
+                    " TypeScript highlighting to it — disable that plugin to see xtsc's diagnostics"
+            )
+        }
+        return true
     }
 }
 
-private val CACHED_TEXT = Key.create<CachedDocumentText>("xtsc.cached.document.text")
+private val CACHED_CONTENT = Key.create<CachedDocumentContent>("xtsc.cached.document.text")
 
-private class CachedDocumentText(val stamp: Long, val text: String)
+private class CachedDocumentContent(val stamp: Long, val content: BufferContent)
+
+/**
+ * Ever-growing source of [BufferContent.version]: read under the read action that also
+ * reads the document's text, so a snapshot of OLDER text always draws a SMALLER number
+ * than any snapshot of text the document moved on to — the order the session relies on.
+ */
+private val bufferVersions = AtomicLong()
 
 /**
  * [Document.getText] copies the whole buffer on every call, and every highlighting pass
@@ -151,13 +198,21 @@ private class CachedDocumentText(val stamp: Long, val text: String)
  * instance to the session each time is also what lets its "has the compiler already seen
  * this text" check answer by reference instead of comparing the characters.
  */
-private fun Document.cachedText(): String {
+private fun Document.cachedContent(): BufferContent {
     val stamp = modificationStamp
-    getUserData(CACHED_TEXT)?.let { if (it.stamp == stamp) return it.text }
-    return text.also { putUserData(CACHED_TEXT, CachedDocumentText(stamp, it)) }
+    getUserData(CACHED_CONTENT)?.let { if (it.stamp == stamp) return it.content }
+    return BufferContent(text, bufferVersions.incrementAndGet())
+        .also { putUserData(CACHED_CONTENT, CachedDocumentContent(stamp, it)) }
 }
 
-/** The span to underline, or `null` when the buffer has shrunk past it since the build. */
+/**
+ * The span to underline, or `null` when the buffer has shrunk past it since the build.
+ *
+ * [Diagnostic.start] is documented upstream as a byte offset, but the compiler emits
+ * Kotlin string indices — UTF-16 code units, exactly what [TextRange] expects — so the
+ * values pass through untranslated. The annotator test with an emoji before the error
+ * is what pins that: it fails the moment either side changes its unit.
+ */
 private fun Diagnostic.rangeIn(fileLength: Int): TextRange? {
     val from = (start ?: return null).coerceAtLeast(0)
     if (from > fileLength) return null
@@ -172,9 +227,9 @@ private fun Diagnostic.rangeIn(fileLength: Int): TextRange? {
 /** The one-line form: [Diagnostic.message] prefixed with the code it was reported under. */
 private val Diagnostic.codedMessage get() = "TS$code: $message"
 
-private val Diagnostic.tooltip: String get() {
+private fun Diagnostic.tooltip(firstLine: String): String {
     val lines = buildList {
-        add(codedMessage)
+        add(firstLine)
         addAll(messageChain)
         relatedInformation.mapTo(this) { related ->
             val where = related.fileName?.substringAfterLast('/')?.let { name ->

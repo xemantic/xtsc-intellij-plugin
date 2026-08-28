@@ -35,6 +35,16 @@ import com.xemantic.typescript.compiler.project.Project as XtscProject
 private const val POLL_MILLIS = 50L
 
 /**
+ * One editor buffer as a highlighting pass snapshotted it.
+ *
+ * [version] orders snapshots of the same document across concurrent passes: it grows with
+ * every new text, so a pass that snapshotted earlier and reached the session later cannot
+ * rewind the compiler to text it has already moved past. `0` marks text read from disk
+ * rather than from a document, which never overrides what a document once handed over.
+ */
+internal class BufferContent(val text: String, val version: Long)
+
+/**
  * One `tsconfig.json`, the [XtscProject] compiling it, and the single thread that owns them.
  *
  * An [XtscProject] is not thread-safe and its builds run synchronously on the calling
@@ -53,12 +63,22 @@ internal class XtscSession(private val tsconfigPath: String) {
     /**
      * The text last handed to the compiler, per path. Written on [executor] only, but
      * readable from any thread so that [XtscService] can tell a save of text the compiler
-     * already has from a change made behind its back.
+     * already has from a change made behind its back. An entry is recorded only AFTER
+     * `updateFile` returns: a failed update must leave the next pass retrying it, not
+     * believing the compiler holds text it never received.
+     *
+     * Entries are never evicted one by one — the compiler has no way to revert an overlay
+     * back to disk — so a long-lived session retains the last text of every buffer it was
+     * ever handed. [XtscService]'s idle eviction of whole sessions is what bounds that.
      */
-    private val overlay = ConcurrentHashMap<String, String>()
+    private val overlay = ConcurrentHashMap<String, BufferContent>()
 
     /** The text the compiler currently holds for [path], or `null` if it reads it from disk. */
-    fun overlaidText(path: String): String? = overlay[path]
+    fun overlaidText(path: String): String? = overlay[path]?.text
+
+    /** When [diagnostics] last ran, in [System.nanoTime] terms; [XtscService] evicts by it. */
+    @Volatile
+    internal var lastUsedNanos: Long = System.nanoTime()
 
     private val closed = AtomicBoolean()
 
@@ -71,13 +91,28 @@ internal class XtscSession(private val tsconfigPath: String) {
      * Returns `null` when the compiler could not answer — an unreadable
      * `tsconfig.json`, or a session that has already been closed.
      */
-    fun diagnostics(buffers: Map<String, String>, filePath: String): List<Diagnostic>? =
-        onCompilerThread { project ->
-            buffers.forEach { (path, text) ->
-                // `updateFile` marks the project dirty unconditionally, so hand it
-                // only text the compiler has not already seen — otherwise every
-                // query would rebuild.
-                if (overlay.put(path, text) != text) project.updateFile(path, text)
+    fun diagnostics(buffers: Map<String, BufferContent>, filePath: String): List<Diagnostic>? {
+        lastUsedNanos = System.nanoTime()
+        return onCompilerThread { project ->
+            buffers.forEach { (path, buffer) ->
+                val seen = overlay[path]
+                // The annotator hands the SAME snapshot instance for an unchanged tab,
+                // so the common case is settled by identity alone.
+                if (seen === buffer) return@forEach
+                // A pass that snapshotted before a concurrent pass's newer text must
+                // not rewind the compiler to what it has already moved past.
+                if (seen != null && seen.version > buffer.version) return@forEach
+                if (seen?.text == buffer.text) {
+                    // Same text under a newer version: nothing to compile, but the newer
+                    // version is recorded so no snapshot older than it can sneak back in.
+                    overlay[path] = buffer
+                    return@forEach
+                }
+                // `updateFile` marks the project dirty unconditionally, so it gets only
+                // text the compiler has not already seen — otherwise every query would
+                // rebuild. The overlay records it only once the update went through.
+                project.updateFile(path, buffer.text)
+                overlay[path] = buffer
             }
             // Only the file on screen is asked about: its answer walks just the slice
             // of the program it depends on, while a query over every open buffer would
@@ -88,6 +123,7 @@ internal class XtscSession(private val tsconfigPath: String) {
             // show a clean editor over a program checked with default options.
             project.diagnosticsOf(listOf(filePath, project.configPath))
         }
+    }
 
     /**
      * Closes the project on its own thread and returns without waiting for it; the
